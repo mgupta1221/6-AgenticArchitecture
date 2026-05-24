@@ -1,0 +1,243 @@
+[
+  {
+    "id": "f1b05f15",
+    "kind": "tool_outcome",
+    "keywords": [
+      "Claude Shannon",
+      "birth date",
+      "death date",
+      "information theory",
+      "contributions"
+    ],
+    "descriptor": "The tool retrieved biographical data and key scientific contributions for Claude Shannon from Wikipedia.",
+    "value": {},
+    "artifact_id": null,
+    "source": "user_query",
+    "run_id": "709f0127",
+    "goal_id": null,
+    "confidence": 0.8,
+    "created_at": "2026-05-24T18:36:30.259082Z"
+  },
+  {
+    "id": "a0272776",
+    "kind": "tool_outcome",
+    "keywords": [
+      "fetch_url",
+      "Claude Shannon",
+      "Wikipedia"
+    ],
+    "descriptor": "Fetched Wikipedia article for Claude Shannon",
+    "value": {},
+    "artifact_id": "art:a5f0d9b40d01e53b",
+    "source": "tool:fetch_url",
+    "run_id": "709f0127",
+    "goal_id": "a1b2c3d4",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:36:50.225346Z"
+  },
+  {
+    "id": "9ef40945",
+    "kind": "fact",
+    "keywords": [
+      "Claude Shannon",
+      "mathematician",
+      "birth",
+      "death"
+    ],
+    "descriptor": "Claude Shannon was an American mathematician born in 1916 and died in 2001.",
+    "value": {},
+    "artifact_id": "art:a5f0d9b40d01e53b",
+    "source": "tool:fetch_url",
+    "run_id": "709f0127",
+    "goal_id": "a1b2c3d4",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:36:50.225346Z"
+  },
+  {
+    "id": "1acc00d2",
+    "kind": "fact",
+    "keywords": [
+      "Claude Shannon",
+      "education",
+      "University of Michigan",
+      "MIT"
+    ],
+    "descriptor": "Claude Shannon attended the University of Michigan and the Massachusetts Institute of Technology.",
+    "value": {},
+    "artifact_id": "art:a5f0d9b40d01e53b",
+    "source": "tool:fetch_url",
+    "run_id": "709f0127",
+    "goal_id": "a1b2c3d4",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:36:50.225346Z"
+  },
+  {
+    "id": "1df9a36b",
+    "kind": "tool_outcome",
+    "keywords": [
+      "Claude Shannon",
+      "birth date",
+      "death date",
+      "information theory",
+      "contributions"
+    ],
+    "descriptor": "The user requested biographical data and key contributions of Claude Shannon from Wikipedia.",
+    "value": {},
+    "artifact_id": null,
+    "source": "user_query",
+    "run_id": "8bc66cc3",
+    "goal_id": null,
+    "confidence": 0.8,
+    "created_at": "2026-05-24T18:39:03.897282Z"
+  },
+  {
+    "id": "1812766a",
+    "kind": "tool_outcome",
+    "keywords": [
+      "Claude Shannon",
+      "birth date",
+      "death date",
+      "information theory",
+      "contributions"
+    ],
+    "descriptor": "The user requested biographical data and key contributions of Claude Shannon from Wikipedia.",
+    "value": {},
+    "artifact_id": null,
+    "source": "user_query",
+    "run_id": "c34fcd88",
+    "goal_id": null,
+    "confidence": 0.8,
+    "created_at": "2026-05-24T18:41:04.833815Z"
+  },
+  {
+    "id": "dd6d2b3e",
+    "kind": "tool_outcome",
+    "keywords": [
+      "Claude Shannon",
+      "birth date",
+      "death date",
+      "information theory",
+      "contributions"
+    ],
+    "descriptor": "The user requested biographical data and key contributions of Claude Shannon from Wikipedia.",
+    "value": {},
+    "artifact_id": null,
+    "source": "user_query",
+    "run_id": "c1c6cfc5",
+    "goal_id": null,
+    "confidence": 0.8,
+    "created_at": "2026-05-24T18:49:15.152170Z"
+  },
+  {
+    "id": "29fec335",
+    "kind": "scratchpad",
+    "keywords": [
+      "Tokyo",
+      "family-friendly",
+      "weekend",
+      "weather",
+      "activities"
+    ],
+    "descriptor": "A request to identify family-friendly activities in Tokyo and evaluate them based on the Saturday weather forecast.",
+    "value": {},
+    "artifact_id": null,
+    "source": "user_query",
+    "run_id": "4ea8e8bf",
+    "goal_id": null,
+    "confidence": 0.8,
+    "created_at": "2026-05-24T18:50:41.674265Z"
+  },
+  {
+    "id": "f21f0194",
+    "kind": "tool_outcome",
+    "keywords": [
+      "tokyo",
+      "family-friendly",
+      "activities",
+      "search"
+    ],
+    "descriptor": "Search results for family-friendly activities in Tokyo",
+    "value": {},
+    "artifact_id": "art:6eef33e8b6408cd7",
+    "source": "tool:web_search",
+    "run_id": "4ea8e8bf",
+    "goal_id": "a1b2c3d1",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:51:03.114148Z"
+  },
+  {
+    "id": "eef13664",
+    "kind": "fact",
+    "keywords": [
+      "tokyo",
+      "attractions",
+      "teamlab",
+      "skytree",
+      "imperial palace",
+      "miraikan",
+      "shinjuku gyoen"
+    ],
+    "descriptor": "Popular family-friendly attractions in Tokyo",
+    "value": {},
+    "artifact_id": "art:6eef33e8b6408cd7",
+    "source": "tool:web_search",
+    "run_id": "4ea8e8bf",
+    "goal_id": "a1b2c3d1",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:51:03.114148Z"
+  },
+  {
+    "id": "bbfdd750",
+    "kind": "fact",
+    "keywords": [
+      "sumo",
+      "ninja",
+      "samurai",
+      "mochi",
+      "sushi"
+    ],
+    "descriptor": "Cultural experiences available for families in Tokyo",
+    "value": {},
+    "artifact_id": "art:6eef33e8b6408cd7",
+    "source": "tool:web_search",
+    "run_id": "4ea8e8bf",
+    "goal_id": "a1b2c3d1",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:51:03.114148Z"
+  },
+  {
+    "id": "15fa77be",
+    "kind": "tool_outcome",
+    "keywords": [
+      "weather",
+      "Tokyo",
+      "forecast",
+      "May 2026"
+    ],
+    "descriptor": "Retrieved weather forecast data for Tokyo in May 2026.",
+    "value": {},
+    "artifact_id": "art:83d3f3e23e6c5348",
+    "source": "tool:web_search",
+    "run_id": "4ea8e8bf",
+    "goal_id": "a1b2c3d2",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:51:39.473532Z"
+  },
+  {
+    "id": "11cc80a4",
+    "kind": "fact",
+    "keywords": [
+      "Tokyo",
+      "weather",
+      "May 2026"
+    ],
+    "descriptor": "Tokyo weather forecast for May 2026 shows variable conditions including sunny, cloudy, and rainy days with temperatures ranging from 12\u00b0C to 29\u00b0C.",
+    "value": {},
+    "artifact_id": "art:83d3f3e23e6c5348",
+    "source": "tool:web_search",
+    "run_id": "4ea8e8bf",
+    "goal_id": "a1b2c3d2",
+    "confidence": 0.9,
+    "created_at": "2026-05-24T18:51:39.473532Z"
+  }
+]

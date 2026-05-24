@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.env
+
+# Keep directory tracked, ignore generated artifacts inside it
+artifacts/*
+!artifacts/.gitkeep
