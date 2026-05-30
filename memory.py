@@ -1,4 +1,4 @@
-"""Memory component — typed recall and durable record updates."""
+"""Memory component — typed recall and durable record updates with vector search."""
 from __future__ import annotations
 
 import json
@@ -7,9 +7,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import faiss
+import numpy as np
+
 from models import MemoryItem, MemoryExtraction, MemoryItemDraft
 
 STATE_FILE = Path(__file__).parent / "state" / "memory.json"
+INDEX_FILE = Path(__file__).parent / "state" / "index.faiss"
+IDS_FILE = Path(__file__).parent / "state" / "index_ids.json"
+EMBED_DIM = 768
 
 
 def _tokenize(text: str) -> set[str]:
@@ -21,6 +27,8 @@ class Memory:
         self._llm = llm
         self._items: list[MemoryItem] = []
         self._loaded = False
+
+    # ── persistence ──
 
     def _load(self):
         if self._loaded:
@@ -45,10 +53,75 @@ class Memory:
             encoding="utf-8",
         )
 
-    # ── read methods (no LLM) ──
+    def _persist_item(self, item: MemoryItem) -> MemoryItem:
+        self._items.append(item)
+        self._save()
+        if item.embedding is not None:
+            self._index_append(item.id, item.embedding)
+        return item
+
+    # ── FAISS index ──
+
+    def _index_append(self, item_id: str, embedding: list[float]):
+        if INDEX_FILE.exists() and IDS_FILE.exists():
+            index = faiss.read_index(str(INDEX_FILE))
+            ids = json.loads(IDS_FILE.read_text(encoding="utf-8"))
+        else:
+            index = faiss.IndexFlatIP(EMBED_DIM)
+            ids = []
+        vec = np.array([embedding], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        index.add(vec)
+        ids.append(item_id)
+        faiss.write_index(index, str(INDEX_FILE))
+        IDS_FILE.write_text(json.dumps(ids), encoding="utf-8")
+
+    def _vector_search(self, query_embedding: list[float], top_k: int) -> list[str]:
+        if not INDEX_FILE.exists() or not IDS_FILE.exists():
+            return []
+        index = faiss.read_index(str(INDEX_FILE))
+        if index.ntotal == 0:
+            return []
+        ids = json.loads(IDS_FILE.read_text(encoding="utf-8"))
+        vec = np.array([query_embedding], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        k = min(top_k, index.ntotal)
+        _, indices = index.search(vec, k)
+        return [ids[i] for i in indices[0] if 0 <= i < len(ids)]
+
+    # ── embedding ──
+
+    def _try_embed(self, text: str, task_type: str = "retrieval_document") -> list[float] | None:
+        try:
+            result = self._llm.embed(text, task_type=task_type)
+            embedding = result.get("embedding")
+            if embedding and len(embedding) == EMBED_DIM:
+                return embedding
+        except Exception:
+            pass
+        return None
+
+    # ── read methods ──
 
     def read(self, query: str, history: list[dict], kinds: list[str] | None = None, top_k: int = 8) -> list[MemoryItem]:
         self._load()
+
+        query_emb = self._try_embed(query, task_type="retrieval_query")
+        if query_emb is not None:
+            hit_ids = self._vector_search(query_emb, top_k=top_k * 2)
+            if hit_ids:
+                id_to_item = {item.id: item for item in self._items}
+                results = [id_to_item[hid] for hid in hit_ids if hid in id_to_item]
+                if kinds:
+                    results = [r for r in results if r.kind in kinds]
+                results = results[:top_k]
+                if results:
+                    print(f"[memory.read] {len(results)} hits (vector)")
+                    return results
+
+        return self._keyword_read(query, history, kinds, top_k)
+
+    def _keyword_read(self, query: str, history: list[dict], kinds: list[str] | None, top_k: int) -> list[MemoryItem]:
         query_tokens = _tokenize(query)
         for h in history[-5:]:
             query_tokens |= _tokenize(json.dumps(h, default=str)[:500])
@@ -65,7 +138,9 @@ class Memory:
                 scored.append((overlap, item))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [item for _, item in scored[:top_k]]
+        results = [item for _, item in scored[:top_k]]
+        print(f"[memory.read] {len(results)} hits (keyword fallback)")
+        return results
 
     def filter(self, kinds: list[str] | None = None, goal_id: str | None = None, recent: int | None = None) -> list[MemoryItem]:
         self._load()
@@ -114,27 +189,33 @@ class Memory:
                 "tool_outcome, or scratchpad note. Extract keywords (important nouns/verbs), "
                 "a short descriptor (one sentence), and a structured value dict. Return JSON."
             ),
-            provider="g",
+            provider="az",
             response_format={"type": "json_schema", "schema": schema, "name": "memory_item"},
             temperature=0.2,
             max_tokens=1024,
         )
         parsed = result.get("parsed") or json.loads(result["text"])
+
+        embedding = None
+        if parsed["kind"] != "scratchpad":
+            embedding = self._try_embed(parsed["descriptor"])
+            if embedding:
+                print("[memory.embed]")
+
         item = MemoryItem(
             id=uuid.uuid4().hex[:8],
             kind=parsed["kind"],
             keywords=parsed["keywords"],
             descriptor=parsed["descriptor"],
             value=parsed["value"],
+            embedding=embedding,
             source=source,
             run_id=run_id,
             goal_id=goal_id,
             confidence=0.8,
             created_at=datetime.now(timezone.utc),
         )
-        self._items.append(item)
-        self._save()
-        return item
+        return self._persist_item(item)
 
     def record_outcome(
         self,
@@ -170,7 +251,7 @@ class Memory:
                 "You are a memory classifier. Given a tool call and its result, create memory items. "
                 "Always include one tool_outcome. Optionally extract facts or preferences. Return JSON."
             ),
-            provider="g",
+            provider="az",
             response_format={"type": "json_schema", "schema": schema, "name": "memory_extraction"},
             temperature=0.2,
             max_tokens=1024,
@@ -179,6 +260,12 @@ class Memory:
 
         new_items = []
         for raw in parsed["items"]:
+            embedding = None
+            if raw["kind"] != "scratchpad":
+                embedding = self._try_embed(raw["descriptor"])
+                if embedding:
+                    print("[memory.embed]")
+
             item = MemoryItem(
                 id=uuid.uuid4().hex[:8],
                 kind=raw["kind"],
@@ -186,6 +273,7 @@ class Memory:
                 descriptor=raw["descriptor"],
                 value=raw["value"],
                 artifact_id=artifact_id,
+                embedding=embedding,
                 source=f"tool:{tool_name}",
                 run_id=run_id,
                 goal_id=goal_id,
@@ -194,6 +282,34 @@ class Memory:
             )
             new_items.append(item)
 
-        self._items.extend(new_items)
-        self._save()
+        for item in new_items:
+            self._persist_item(item)
         return new_items
+
+    def add_fact(
+        self,
+        descriptor: str,
+        *,
+        value: dict,
+        keywords: list[str],
+        source: str,
+        run_id: str,
+        goal_id: str | None = None,
+    ) -> MemoryItem:
+        self._load()
+        embedding = self._try_embed(descriptor)
+        if embedding:
+            print("[memory.embed]")
+        item = MemoryItem(
+            id=uuid.uuid4().hex[:8],
+            kind="fact",
+            keywords=[k.lower() for k in keywords],
+            descriptor=descriptor,
+            value=value,
+            embedding=embedding,
+            source=source,
+            run_id=run_id,
+            goal_id=goal_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self._persist_item(item)

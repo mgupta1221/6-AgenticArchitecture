@@ -1,8 +1,14 @@
-"""Python client for LLM Gateway V3. Adds auto_route kwarg on top of V2."""
-import os, json, httpx
+"""Python client for LLM Gateway V7. Adds an embed() method on top of V3."""
+import os, json, time, httpx
 from typing import Any, Optional
 
-DEFAULT_URL = os.getenv("LLM_GATEWAY_V3_URL", "http://localhost:8101")
+# Retry config for transient gateway errors (502/503).
+# Free-tier LLM providers rate-limit rapid successive calls,
+# so a short backoff between retries is usually enough.
+MAX_RETRIES = 3
+RETRY_DELAY_SECS = 2
+
+DEFAULT_URL = os.getenv("LLM_GATEWAY_V7_URL", "http://localhost:8107")
 
 
 class LLM:
@@ -31,11 +37,23 @@ class LLM:
             "auto_route": auto_route,
         }
         body = {k: v for k, v in body.items() if v is not None}
-        r = httpx.post(f"{self.base_url}/v1/chat", json=body, timeout=self.timeout)
-        if r.status_code >= 400:
-            detail = r.text[:500] if r.text else "(no body)"
-            raise RuntimeError(f"Gateway {r.status_code}: {detail}")
-        return r.json()
+
+        # Retry on 5xx errors — free-tier providers often rate-limit
+        # rapid successive calls during agent loops.
+        last_resp = None
+        for attempt in range(MAX_RETRIES):
+            last_resp = httpx.post(f"{self.base_url}/v1/chat", json=body, timeout=self.timeout)
+            if last_resp.status_code < 500:
+                last_resp.raise_for_status()
+                return last_resp.json()
+            # 5xx — wait before retrying (rate limit cooldown)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY_SECS)
+        # All retries exhausted — raise the last error
+        raise httpx.HTTPStatusError(
+            f"{provider} - Gateway {last_resp.status_code} after {MAX_RETRIES} attempts",
+            request=last_resp.request, response=last_resp,
+        )
 
     def stream(self, prompt: str = None, *, messages=None, system=None,
                provider: str = None, model: str = None,
@@ -64,6 +82,17 @@ class LLM:
 
     def capabilities(self):
         return httpx.get(f"{self.base_url}/v1/capabilities", timeout=30).json()
+
+    def embed(self, text: str,
+              task_type: str = "retrieval_document",
+              provider: Optional[str] = None) -> dict:
+        """Returns {provider, model, embedding, dim, latency_ms, attempted}."""
+        body = {"text": text, "task_type": task_type}
+        if provider:
+            body["provider"] = provider
+        r = httpx.post(f"{self.base_url}/v1/embed", json=body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
 
 
 def ask(prompt: str, provider: str = None, **kw) -> str:

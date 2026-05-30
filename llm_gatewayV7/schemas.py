@@ -1,4 +1,4 @@
-"""Pydantic v2 request/response models for llm_gatewayV3."""
+"""Pydantic v2 request/response models for llm_gatewayV7."""
 from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -71,6 +71,24 @@ class RouterDecision(BaseModel):
     chosen_worker_provider: Optional[str] = None
     chosen_worker_model: Optional[str] = None
     fallback_used: bool = False  # true if router LLM failed and tier was decided by token-count rule
+
+
+class EmbedRequest(BaseModel):
+    """Request for POST /v1/embed. The model is fixed per deployment (see
+    README); only the text, task type, and an optional explicit provider
+    are caller-controlled."""
+    text: str
+    task_type: Literal["retrieval_document", "retrieval_query"] = "retrieval_document"
+    provider: Optional[str] = None  # "ollama" | configured fallback name
+
+
+class EmbedResponse(BaseModel):
+    provider: str
+    model: str
+    embedding: list[float]
+    dim: int
+    latency_ms: int = 0
+    attempted: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

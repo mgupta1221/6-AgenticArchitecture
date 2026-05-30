@@ -17,7 +17,7 @@
  │  run_id = "7827d647"                                                   │
  │  history = []              ◄── in-memory, dies when run ends           │
  │  prior_goals = []          ◄── in-memory, updated each iteration       │
- │  ensure_gateway()          ◄── verify LLM Gateway at localhost:8101    │
+ │  ensure_gateway()          ◄── verify LLM Gateway at localhost:8107    │
  └────────────────────────────────────┬────────────────────────────────────┘
                                       │
                                       ▼
@@ -34,6 +34,7 @@
  │  │   keywords: ["Tokyo","family","weather","Saturday"],          │      │
  │  │   descriptor: "A request to find family-friendly activities   │      │
  │  │                in Tokyo based on weather",                    │      │
+ │  │   embedding: null,       ◄── scratchpad items skip embedding │      │
  │  │   source: "user_query",                                      │      │
  │  │   run_id: "7827d647"                                         │      │
  │  │ }                                                            │      │
@@ -44,14 +45,20 @@
  │                    │  state/memory.json   │  ◄── PERSISTED TO DISK     │
  │                    │  (append + save)     │                             │
  │                    └─────────────────────┘                             │
+ │                                                                        │
+ │  NOTE: Non-scratchpad items also get a 768-dim embedding via the       │
+ │  gateway's /v1/embed endpoint. The embedding vector is stored both     │
+ │  in the MemoryItem AND in the FAISS index on disk.                     │
+ │                                                                        │
  └────────────────────────────────────┬────────────────────────────────────┘
                                       │
                                       ▼
  ┌─────────────────────────────────────────────────────────────────────────┐
  │  MCP SESSION OPEN                                                      │
  │  Connect to mcp_server.py via stdio                                    │
- │  Load 9 tools: web_search, fetch_url, get_time, currency_convert,     │
- │                read_file, list_dir, create_file, update_file, edit_file│
+ │  Load 11 tools: web_search, fetch_url, get_time, currency_convert,    │
+ │                 read_file, list_dir, create_file, update_file,         │
+ │                 edit_file, index_document, search_knowledge            │
  └────────────────────────────────────┬────────────────────────────────────┘
                                       │
        ┌──────────────────────────────┘
@@ -63,20 +70,31 @@
        ▼
  ┌─────────────────────────────────────────────────────────────────────────┐
  │                                                                        │
- │  STEP 1: memory.read(query, history)                    [NO LLM CALL]  │
+ │  STEP 1: memory.read(query, history)                    [EMBED CALL]   │
  │                                                                        │
- │  Pure Python keyword-overlap search:                                   │
+ │  HYBRID RETRIEVAL — vector search first, keyword fallback:             │
  │                                                                        │
- │  1. Tokenize query: {"tokyo","family","weather","saturday",...}         │
- │  2. Tokenize last 5 history events (adds recent context)               │
- │  3. For each item in memory.json:                                      │
- │     item_tokens = item.keywords + tokenize(item.descriptor)            │
- │     score = len(query_tokens & item_tokens)                            │
- │  4. Return top-8 items sorted by score                                 │
+ │  1. Embed the query via gateway /v1/embed (768-dim, task=retrieval_    │
+ │     query). Normalize with L2.                                         │
+ │  2. FAISS cosine-similarity search (IndexFlatIP) against all stored    │
+ │     embeddings. Retrieve top_k * 2 candidates.                        │
+ │  3. Map FAISS result indices back to MemoryItem IDs via index_ids.json │
+ │  4. Filter by optional `kinds` parameter, trim to top_k.              │
  │                                                                        │
- │  Reads from ──► ┌─────────────────────┐                                │
- │                 │  state/memory.json   │                                │
- │                 └─────────────────────┘                                │
+ │  If vector search returns results → return them.                       │
+ │  If embedding fails OR FAISS returns nothing → KEYWORD FALLBACK:       │
+ │                                                                        │
+ │     a. Tokenize query: {"tokyo","family","weather","saturday",...}      │
+ │     b. Tokenize last 5 history events (adds recent context)            │
+ │     c. For each item in memory.json:                                   │
+ │        item_tokens = item.keywords + tokenize(item.descriptor)         │
+ │        score = len(query_tokens & item_tokens)                         │
+ │     d. Return top-8 items sorted by score                              │
+ │                                                                        │
+ │  Reads from ──► ┌─────────────────────┐  ┌──────────────────────┐     │
+ │                 │  state/memory.json   │  │  state/index.faiss   │     │
+ │                 └─────────────────────┘  │  state/index_ids.json │     │
+ │                                           └──────────────────────┘     │
  │                                                                        │
  │  Returns: hits = [MemoryItem, MemoryItem, ...]  (up to 8)             │
  │  ════════════════════════════════════════════════                       │
@@ -189,8 +207,8 @@
  │  │ goal      = Goal(id, text, done, attach_artifact_id)         │      │
  │  │ hits      = [MemoryItem, ...]       ◄── from Step 1          │      │
  │  │ attached  = [(aid, bytes), ...]     ◄── from Step 4          │      │
- │  │ history   = last 6 events           ◄── trimmed for tokens   │      │
- │  │ tools     = [9 MCP tool defs]       ◄── name, desc, schema   │      │
+ │  │ history   = last 10 events          ◄── trimmed for tokens   │      │
+ │  │ tools     = [11 MCP tool defs]      ◄── name, desc, schema   │      │
  │  └──────────────────────────────────────────────────────────────┘      │
  │                                                                        │
  │  PROMPT ASSEMBLED AS:                                                  │
@@ -302,6 +320,7 @@
  │  │   kind: "tool_outcome",                                      │      │
  │  │   descriptor: "Search results for family activities Tokyo",  │      │
  │  │   artifact_id: "art:9b74...",   ◄── links to artifact        │      │
+ │  │   embedding: [0.12, -0.03, ...],◄── 768-dim from /v1/embed  │      │
  │  │   source: "tool:web_search",                                 │      │
  │  │   confidence: 0.9                                            │      │
  │  │ }                                                            │      │
@@ -309,16 +328,18 @@
  │  │ MemoryItem {                                                 │      │
  │  │   kind: "fact",                                              │      │
  │  │   descriptor: "Ueno Park is recommended for families",       │      │
+ │  │   embedding: [0.08, 0.15, ...], ◄── 768-dim from /v1/embed  │      │
  │  │   source: "tool:web_search",                                 │      │
  │  │   confidence: 0.9                                            │      │
  │  │ }                                                            │      │
  │  └────────────────────────────┬─────────────────────────────────┘      │
  │                               │                                        │
  │                               ▼                                        │
- │                    ┌─────────────────────┐                             │
- │                    │  state/memory.json   │  ◄── PERSISTED TO DISK     │
- │                    │  (append + save)     │                             │
- │                    └─────────────────────┘                             │
+ │              ┌─────────────────────┐  ┌──────────────────────┐         │
+ │              │  state/memory.json   │  │  state/index.faiss   │         │
+ │              │  (append + save)     │  │  state/index_ids.json│         │
+ │              └─────────────────────┘  └──────────────────────┘         │
+ │              ▲ MemoryItem persisted   ▲ Embedding vector added         │
  │                                                                        │
  └────────────────────────────────────┬────────────────────────────────────┘
                                       │
@@ -367,6 +388,139 @@
 
 ---
 
+## Vector Search & FAISS Integration
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                    EMBEDDING PIPELINE                                   │
+ │                                                                        │
+ │  When a MemoryItem is created (kind != "scratchpad"):                  │
+ │                                                                        │
+ │  1. Call gateway POST /v1/embed with the item's descriptor             │
+ │     ┌──────────────────────────────────────────────────┐               │
+ │     │  LLM.embed(descriptor, task_type="retrieval_     │               │
+ │     │            document")                             │               │
+ │     │  → 768-dim float vector                           │               │
+ │     │  Providers: Ollama (default), Gemini (fallback)   │               │
+ │     └──────────────────────────────────────────────────┘               │
+ │                                                                        │
+ │  2. Store embedding in the MemoryItem itself                           │
+ │     item.embedding = [0.12, -0.03, 0.41, ...]  (768 floats)           │
+ │                                                                        │
+ │  3. Append to FAISS index on disk                                      │
+ │     ┌──────────────────────────────────────────────────┐               │
+ │     │  _index_append(item_id, embedding)                │               │
+ │     │                                                   │               │
+ │     │  a. Load (or create) IndexFlatIP(768)             │               │
+ │     │  b. L2-normalize the vector                       │               │
+ │     │  c. index.add(vector)                             │               │
+ │     │  d. Append item_id to ID list                     │               │
+ │     │  e. Write both to disk:                           │               │
+ │     │     state/index.faiss      ◄── FAISS binary       │               │
+ │     │     state/index_ids.json   ◄── ["id1","id2",...]  │               │
+ │     └──────────────────────────────────────────────────┘               │
+ │                                                                        │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                    RETRIEVAL PIPELINE (memory.read)                     │
+ │                                                                        │
+ │  Query: "Find family-friendly activities in Tokyo"                     │
+ │                                                                        │
+ │  ┌─ TRY VECTOR SEARCH ────────────────────────────────────────────┐    │
+ │  │                                                                 │    │
+ │  │  1. Embed query (task_type="retrieval_query")                   │    │
+ │  │  2. L2-normalize                                                │    │
+ │  │  3. FAISS inner-product search (= cosine similarity on          │    │
+ │  │     normalized vectors)                                         │    │
+ │  │  4. Retrieve top_k * 2 nearest neighbor IDs                     │    │
+ │  │  5. Map IDs → MemoryItems via in-memory dict                    │    │
+ │  │  6. Filter by kinds if specified, trim to top_k                 │    │
+ │  │                                                                 │    │
+ │  │  print "[memory.read] N hits (vector)"                          │    │
+ │  │  ──► return results                                             │    │
+ │  └─────────────────────────────────────────────────────────────────┘    │
+ │         │ embedding fails or no FAISS results                          │
+ │         ▼                                                              │
+ │  ┌─ KEYWORD FALLBACK ─────────────────────────────────────────────┐    │
+ │  │                                                                 │    │
+ │  │  1. Tokenize query + last 5 history events                      │    │
+ │  │  2. Score each MemoryItem by keyword overlap                    │    │
+ │  │  3. Sort by overlap, return top_k                               │    │
+ │  │                                                                 │    │
+ │  │  print "[memory.read] N hits (keyword fallback)"                │    │
+ │  │  ──► return results                                             │    │
+ │  └─────────────────────────────────────────────────────────────────┘    │
+ │                                                                        │
+ └─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Document Indexing & Knowledge Search
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │  index_document(path) — MCP Tool                                       │
+ │                                                                        │
+ │  Purpose: Chunk a file or artifact and write each chunk into Memory    │
+ │  as a searchable `fact` with an embedding. Enables later vector        │
+ │  queries via search_knowledge.                                         │
+ │                                                                        │
+ │  1. Read content from sandbox file or artifact (art:xxx)               │
+ │                                                                        │
+ │  2. Sliding-window chunking                                            │
+ │     ┌────────────────────────────────────────────────────────────┐     │
+ │     │  chunk_size = 400 words (default)                          │     │
+ │     │  overlap    = 80 words (default)                           │     │
+ │     │  stride     = chunk_size - overlap = 320 words             │     │
+ │     │                                                            │     │
+ │     │  ┌─────────────────────────────────────┐                  │     │
+ │     │  │ chunk 1: words[0..399]              │                  │     │
+ │     │  │         ┌──────────────────────────────────┐           │     │
+ │     │  │         │ chunk 2: words[320..719]         │           │     │
+ │     │  │         │         ┌─────────────────────────────┐     │     │
+ │     │  │         │         │ chunk 3: words[640..1039]   │     │     │
+ │     │  └─────────┼─────────┼────────────────────────────┘     │     │
+ │     │            └─────────┼────────────────────────────────────┘     │
+ │     │                      └── 80-word overlap between chunks         │
+ │     └────────────────────────────────────────────────────────────┘     │
+ │                                                                        │
+ │  3. For each chunk → memory.add_fact()                                 │
+ │     - descriptor: "[sandbox:file.md chunk 1/5] preview..."             │
+ │     - value.chunk: full chunk text                                     │
+ │     - keywords: top-20 words from chunk                                │
+ │     - embedding: 768-dim vector via /v1/embed                          │
+ │     - Appended to memory.json + FAISS index                            │
+ │                                                                        │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │  search_knowledge(query, k) — MCP Tool                                 │
+ │                                                                        │
+ │  Purpose: Vector search over indexed `fact` chunks.                    │
+ │  Calls memory.read(query, kinds=["fact"], top_k=k)                     │
+ │                                                                        │
+ │  Returns ranked chunks with provenance:                                │
+ │  [                                                                     │
+ │    {                                                                   │
+ │      "id": "abc12345",                                                 │
+ │      "descriptor": "[sandbox:spec.md chunk 2/5] ...",                  │
+ │      "source": "sandbox:spec.md",                                      │
+ │      "chunk_preview": "first 240 chars of chunk...",                   │
+ │      "metadata": { chunk_index, total_chunks, source }                 │
+ │    },                                                                  │
+ │    ...                                                                 │
+ │  ]                                                                     │
+ │                                                                        │
+ │  Decision sees these results and synthesizes answers from them          │
+ │  without re-fetching the original source.                              │
+ │                                                                        │
+ └─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Concrete 3-Iteration Example
 
 ```
@@ -374,8 +528,10 @@
  ITER 1
  ══════════════════════════════════════════════════════════════════════════
 
- memory.read()  ─────► hits = [1 item from remember()]        NO LLM
-                       (keyword match: "Tokyo","weather")
+ memory.read()  ─────► Embed query → FAISS search             EMBED CALL
+                       hits = [1 item from remember()]
+                       (cosine similarity on "Tokyo","weather")
+                       Falls back to keyword if no FAISS index yet
 
  Perception     ─────► Creates 3 goals:                       LLM (Gemini)
                        g:a1b2 "Search activities"    done=F
@@ -394,6 +550,7 @@
  Action      ─────► 10KB result → ARTIFACT created            NO LLM
                     art:9b74... stored in state/artifacts/
  record_outcome ──► 2 MemoryItems saved to memory.json        LLM (Gemini)
+                    + embedded (768-dim) + indexed in FAISS
                     (1 tool_outcome + 1 fact)
 
  history += [{"kind":"action", "tool":"web_search",
@@ -403,7 +560,7 @@
  ITER 2
  ══════════════════════════════════════════════════════════════════════════
 
- memory.read()  ─────► hits = [4 items] (original + iter1)    NO LLM
+ memory.read()  ─────► FAISS cosine search → 4 hits (vector)  EMBED CALL
 
  Perception     ─────► Reviews history, marks g:a1b2 DONE     LLM (Gemini)
                        g:a1b2 "Search activities"    done=T ✓
@@ -420,7 +577,7 @@
  Decision    ─────► TOOL_CALL: web_search("Tokyo weather")    LLM (auto-route)
  Action      ─────► 10KB result → ARTIFACT created            NO LLM
                     art:fd37... stored in state/artifacts/
- record_outcome ──► 2 MemoryItems saved to memory.json        LLM (Gemini)
+ record_outcome ──► 2 MemoryItems + embeddings + FAISS index  LLM (Gemini)
 
  history += [{"kind":"action", "tool":"web_search",
               "artifact_id":"art:fd37...", ...}]
@@ -429,7 +586,7 @@
  ITER 3
  ══════════════════════════════════════════════════════════════════════════
 
- memory.read()  ─────► hits = [8 items] (growing)             NO LLM
+ memory.read()  ─────► FAISS cosine search → 8 hits (vector)  EMBED CALL
 
  Perception     ─────► Marks g:e5f6 DONE                      LLM (Gemini)
                        Sets attach_artifact_id on g:i9j0
@@ -460,7 +617,7 @@
  ITER 4
  ══════════════════════════════════════════════════════════════════════════
 
- memory.read()  ─────► hits = [8 items]                       NO LLM
+ memory.read()  ─────► FAISS cosine search → 8 hits (vector)  EMBED CALL
 
  Perception     ─────► Sees answer in history for g:i9j0       LLM (Gemini)
                        Marks g:i9j0 DONE
@@ -515,17 +672,37 @@
  │  ┌───────────────────────────────────────────────────────────┐      │
  │  │ [                                                         │      │
  │  │   {kind:"scratchpad", desc:"A request to find...",        │      │
+ │  │    embedding: null,                                       │      │
  │  │    source:"user_query", run_id:"7827d647"},               │      │
  │  │   {kind:"tool_outcome", desc:"Search results for...",     │      │
- │  │    artifact_id:"art:9b74...", source:"tool:web_search"},  │      │
- │  │   {kind:"fact", desc:"Ueno Park is recommended..."},      │      │
- │  │   {kind:"tool_outcome", desc:"Weather forecast...",       │      │
- │  │    artifact_id:"art:fd37...", source:"tool:web_search"},  │      │
- │  │   {kind:"fact", desc:"Tokyo May weather averages 22C"},   │      │
+ │  │    artifact_id:"art:9b74...",                             │      │
+ │  │    embedding: [0.12, -0.03, ...],  ◄── 768-dim vector     │      │
+ │  │    source:"tool:web_search"},                             │      │
+ │  │   {kind:"fact", desc:"Ueno Park is recommended...",       │      │
+ │  │    embedding: [0.08, 0.15, ...],   ◄── 768-dim vector     │      │
+ │  │    source:"tool:web_search"},                             │      │
  │  │ ]                                                         │      │
  │  └───────────────────────────────────────────────────────────┘      │
- │  Written by: memory.remember(), memory.record_outcome()             │
- │  Read by:    memory.read() (keyword search, no LLM)                 │
+ │  Written by: memory.remember(), memory.record_outcome(),            │
+ │              memory.add_fact()                                       │
+ │  Read by:    memory.read() (vector search + keyword fallback)       │
+ │                                                                     │
+ │  state/index.faiss          ◄── FAISS IndexFlatIP binary            │
+ │  ┌───────────────────────────────────────────────────────────┐      │
+ │  │ Binary file, IndexFlatIP(768)                             │      │
+ │  │ Contains L2-normalized 768-dim vectors for all non-       │      │
+ │  │ scratchpad MemoryItems. Supports inner-product search     │      │
+ │  │ (equivalent to cosine similarity on normalized vectors).  │      │
+ │  └───────────────────────────────────────────────────────────┘      │
+ │  Written by: _index_append() (called from _persist_item)            │
+ │  Read by:    _vector_search() (called from memory.read)             │
+ │                                                                     │
+ │  state/index_ids.json       ◄── maps FAISS row → MemoryItem ID     │
+ │  ┌───────────────────────────────────────────────────────────┐      │
+ │  │ ["abc12345", "def67890", "ghi13579", ...]                 │      │
+ │  │ Index i in this array corresponds to row i in the FAISS   │      │
+ │  │ index. Used to map search results back to MemoryItems.    │      │
+ │  └───────────────────────────────────────────────────────────┘      │
  │                                                                     │
  │  state/artifacts/                                                   │
  │  ┌───────────────────────────────────────────────────────────┐      │
@@ -557,16 +734,20 @@
  │ Component              │ LLM?     │ Provider                         │
  ├────────────────────────┼──────────┼──────────────────────────────────┤
  │ memory.remember()      │ YES (1x) │ Gemini (provider="g")            │
- │ memory.read()          │ NO       │ Pure Python keyword match        │
+ │ memory.read()          │ EMBED    │ Gateway /v1/embed (query vector) │
+ │                        │          │ + FAISS search (no LLM)          │
+ │                        │          │ Fallback: Pure Python keywords   │
  │ Perception.observe()   │ YES      │ Gemini (provider="g")            │
  │ Decision.next_step()   │ YES      │ Auto-routed (router picks tier)  │
  │ Action.execute()       │ NO       │ Pure MCP dispatch                │
  │ memory.record_outcome()│ YES      │ Gemini (provider="g")            │
+ │ memory.add_fact()      │ EMBED    │ Gateway /v1/embed (doc vector)   │
  │ Agent6 loop itself     │ NO       │ Plain Python orchestration       │
  │ ArtifactStore          │ NO       │ Pure file I/O                    │
  ├────────────────────────┼──────────┼──────────────────────────────────┤
- │ TOTAL per 3-iter run   │ 9 calls  │ 1 remember + 3 perception +     │
- │                        │          │ 3 decision + 2 record_outcome    │
+ │ TOTAL per 3-iter run   │ ~9 LLM   │ 1 remember + 3 perception +     │
+ │                        │ + embeds │ 3 decision + 2 record_outcome   │
+ │                        │          │ + ~6 embed calls (query + store) │
  └────────────────────────┴──────────┴──────────────────────────────────┘
 ```
 
@@ -580,18 +761,18 @@ When a user passes a query like *"Find 3 family-friendly things to do in Tokyo t
 
 **Phase 0 — Startup**
 
-`agent6.py` creates all component instances (`LLM`, `ArtifactStore`, `Memory`, `Perception`, `Decision`) and generates a unique `run_id`. It verifies the LLM Gateway is running at `localhost:8101` via `ensure_gateway()`. Two in-memory structures are initialized:
+`agent6.py` creates all component instances (`LLM`, `ArtifactStore`, `Memory`, `Perception`, `Decision`) and generates a unique `run_id`. It verifies the LLM Gateway V7 is running at `localhost:8107` via `ensure_gateway()`. Two in-memory structures are initialized:
 
 - `history = []` — list of dicts, tracks every event in this run, dies when the run ends.
 - `prior_goals = []` — list of `Goal` objects, set once by Perception on iteration 1, then only `done` flags and `attach_artifact_id` are updated.
 
 **Phase 1 — `memory.remember(query)`** [LLM Call — Gemini]
 
-The raw query is sent to Memory. An LLM call classifies it and extracts keywords + a descriptor. A `MemoryItem` is created (kind: `"scratchpad"`, source: `"user_query"`) and **appended to `state/memory.json`** on disk. This allows future runs to recall what the user asked.
+The raw query is sent to Memory. An LLM call (Gemini, `provider="g"`) classifies it and extracts keywords + a descriptor. A `MemoryItem` is created (kind: `"scratchpad"`, source: `"user_query"`). Since scratchpad items skip embedding, no vector is generated. The item is **appended to `state/memory.json`** on disk.
 
 **Phase 2 — MCP Session Opens**
 
-Connects to `mcp_server.py` via stdio transport. Loads the 9 available tools: `web_search`, `fetch_url`, `get_time`, `currency_convert`, `read_file`, `list_dir`, `create_file`, `update_file`, `edit_file`.
+Connects to `mcp_server.py` via stdio transport. Loads the 11 available tools: `web_search`, `fetch_url`, `get_time`, `currency_convert`, `read_file`, `list_dir`, `create_file`, `update_file`, `edit_file`, `index_document`, `search_knowledge`.
 
 **Phase 3 — The Iteration Loop** (max 15 iterations)
 
@@ -599,15 +780,15 @@ Each iteration runs these steps in order:
 
 | Step | Component | LLM? | What Happens |
 |------|-----------|------|--------------|
-| A | `memory.read(query, history)` | No | Pure Python keyword-overlap search across `state/memory.json`. Tokenizes the query + last 5 history events, scores each MemoryItem by keyword intersection, returns top-8 hits. |
-| B | `Perception.observe(obs)` | Yes (Gemini) | Receives an `Observe` packet containing query, memory_hits, history, and prior_goals. On **iteration 1**, creates the goal list from scratch (e.g., 3 goals). On **iteration 2+**, reviews history and updates only `done` flags and `attach_artifact_id` on existing goals. Goals are **never added, removed, or reordered** (Session 6 constraint). Result is appended to history as `{kind: "perception"}`. |
+| A | `memory.read(query, history)` | Embed only | **Hybrid retrieval**: first embeds the query via gateway `/v1/embed` (768-dim, `task_type="retrieval_query"`), then runs FAISS cosine-similarity search across all stored embeddings. If vector search returns results, uses those. If embedding fails or FAISS has no entries, falls back to pure Python keyword-overlap search. Returns top-8 hits. |
+| B | `Perception.observe(obs)` | Yes (Gemini) | Receives an `Observe` packet containing query, memory_hits, history, and prior_goals. On **iteration 1**, creates the goal list from scratch. On **iteration 2+**, reviews history and updates only `done` flags and `attach_artifact_id` on existing goals. Goals are **never added, removed, or reordered** (Session 6 constraint). Result is appended to history as `{kind: "perception"}`. |
 | C | Completion check | No | If all goals are `done` AND an answer exists in history → **BREAK**. If all goals are `done` but no answer exists → **synthesis fallback**: creates a temporary `Goal(id="synthesis")`, attaches last 3 artifacts, calls Decision with empty tools list (forces an answer), appends to history, then **BREAK**. |
 | D | Goal selection | No | Picks the first goal in `prior_goals` where `done == False`. |
 | E | Artifact attachment | No | If Perception set `attach_artifact_id` on the selected goal and the artifact exists on disk, loads the raw bytes into `attached = [(artifact_id, bytes)]`. |
-| F | `Decision.next_step(goal, hits, attached, history, tools)` | Yes (auto-routed) | Receives the current goal, memory hits, attached artifact bytes (if any), last 6 history events, and the 9 tool definitions. Returns **exactly one of**: a final answer (plain text) or one tool call (name + arguments). |
+| F | `Decision.next_step(goal, hits, attached, history, tools)` | Yes (auto-routed) | Receives the current goal, memory hits, attached artifact bytes (if any), last 10 history events, and the 11 tool definitions. Returns **exactly one of**: a final answer (plain text) or one tool call (name + arguments). Decision is aware of `index_document` and `search_knowledge` tools — it uses `index_document` for "make searchable" goals and `search_knowledge` for "query the knowledge base" goals. |
 | G | If **answer**: append `{kind: "answer", text: "..."}` to history. Loop continues; next iteration Perception will mark the goal done. | | |
 | H | If **tool call**: `Action.execute()` dispatches the MCP tool. If output > 4096 bytes, it's stored in `ArtifactStore` on disk (`.bin` + `.json`) and only a 2000-char descriptor + artifact handle are returned. If ≤ 4096 bytes, the full text stays inline. | No | |
-| I | `memory.record_outcome()` | Yes (Gemini) | LLM classifies the tool result, extracts facts/preferences, creates 1+ MemoryItems **appended to `state/memory.json`**. |
+| I | `memory.record_outcome()` | Yes (Gemini) + Embed | LLM classifies the tool result, extracts facts/preferences, creates 1+ MemoryItems. Each non-scratchpad item gets a 768-dim embedding via `/v1/embed` and is **appended to both `state/memory.json` AND the FAISS index** on disk. |
 | J | Append `{kind: "action", tool, arguments, result_descriptor, artifact_id}` to history. | No | |
 
 **Phase 4 — Final Answer**
@@ -631,9 +812,16 @@ After the loop exits, `final_answer_from(history)` scans history in reverse and 
 
 - Written by `memory.remember(query)` — once at run start
 - Written by `memory.record_outcome()` — after every tool call (1+ MemoryItems per call)
+- Written by `memory.add_fact()` — during document indexing (via `index_document` tool)
 - **Never written by** Perception, Decision, the completion check, or the loop itself
 
-### 2. Why do we need both?
+**FAISS index** (persistent on disk, survives across runs):
+
+- Written alongside memory.json whenever a non-scratchpad MemoryItem is persisted
+- `state/index.faiss` — the binary FAISS index (IndexFlatIP, 768-dim)
+- `state/index_ids.json` — maps FAISS row index to MemoryItem ID
+
+### 2. Why do we need both history and memory?
 
 They answer different questions:
 
@@ -643,48 +831,51 @@ They answer different questions:
 | **Used by** | Perception (which goals are done?), Decision (avoid repeating tool calls) | memory.read() returns relevant past knowledge to Perception and Decision |
 | **Granularity** | Every event: perception updates, tool calls, answers | Condensed: only extracted facts, tool outcomes, user preferences |
 | **Lifetime** | Current run only | Persists forever (until manually deleted) |
+| **Retrieval** | Sequential scan | FAISS vector search (primary) + keyword overlap (fallback) |
 
 **Example of memory helping across runs:**
 
-- Run 1: User asks "Find Tokyo activities" → `web_search` runs → `memory.record_outcome()` stores `{kind: "fact", descriptor: "Ueno Park is recommended for families"}`
-- Run 2: User asks "Plan a Tokyo trip" → `memory.read()` finds the Ueno Park fact via keyword overlap ("Tokyo") → Decision can use it directly without searching again
+- Run 1: User asks "Find Tokyo activities" → `web_search` runs → `memory.record_outcome()` stores `{kind: "fact", descriptor: "Ueno Park is recommended for families", embedding: [0.08, 0.15, ...]}` + adds vector to FAISS
+- Run 2: User asks "Plan a Tokyo trip" → `memory.read()` embeds "Plan a Tokyo trip", FAISS finds the Ueno Park fact via cosine similarity → Decision can use it directly without searching again
 
 ### 3. In what cases are LLM calls required?
 
-Exactly **4 places** in the codebase make LLM calls:
+Exactly **4 places** in the codebase make LLM calls, plus embedding calls:
 
 | Component | When | Provider | Purpose |
 |-----------|------|----------|---------|
 | `memory.remember(query)` | Once at run start | Gemini (`provider="g"`) | Classify query into a MemoryItem |
 | `Perception.observe()` | Every iteration | Gemini (`provider="g"`) | Create goals (iter 1) or update done flags (iter 2+) |
-| `Decision.next_step()` | Every iteration with an unfinished goal | Auto-routed (router picks tier) | Pick one tool call or return a final answer |
+| `Decision.next_step()` | Every iteration with an unfinished goal | Auto-routed (`auto_route="decision"`) | Pick one tool call or return a final answer |
 | `memory.record_outcome()` | After every tool call | Gemini (`provider="g"`) | Extract facts/outcomes from tool results |
+| `memory._try_embed()` | After each non-scratchpad MemoryItem creation + each `memory.read()` query | Gateway `/v1/embed` (Ollama/Gemini) | Generate 768-dim embedding vectors |
 
-**Total for a typical 3-iteration run:** ~9 LLM calls
-(1 remember + 3 perception + 3 decision + 2 record_outcome)
+**Total for a typical 3-iteration run:** ~9 LLM calls + ~6 embedding calls
+(1 remember + 3 perception + 3 decision + 2 record_outcome + 3 query embeds + 3 item embeds)
 
-Everything else — `memory.read()`, `Action.execute()`, `ArtifactStore`, the Agent6 loop itself — is **pure Python with zero LLM calls**.
+Everything else — `memory.read()` FAISS search, `Action.execute()`, `ArtifactStore`, the Agent6 loop itself — is **pure Python with zero LLM calls**.
 
-### 4. Can persistent memory cause false answers from keyword overlap across runs?
+### 4. How does vector search improve over keyword-only retrieval?
 
-**Yes, this is a real and known limitation in Session 6.**
+**Keyword overlap (base version):**
+- "Plan a Tokyo trip" matches memory items containing the word "Tokyo"
+- Also matches "Tokyo population census" (same keyword, wrong intent)
+- Misses "Explore Japanese capital" (different words, same meaning)
 
-**How it happens:**
+**FAISS vector search (current version):**
+- "Plan a Tokyo trip" is embedded to a 768-dim vector
+- Cosine similarity finds semantically related items regardless of exact words
+- "Explore Japanese capital" scores high (similar meaning)
+- "Tokyo population census" scores lower (different intent)
+- Falls back to keyword search if embedding service is unavailable
 
-- Run 1: Query "Find Tokyo activities" → memory stores facts about activities with keywords `["Tokyo", "activities", "family"]`
-- Run 2: Query "Find Tokyo restaurants" → `memory.read()` returns the activity facts because `"Tokyo"` overlaps
-- Perception sees these activity-related memory hits and may incorrectly believe the "activities" goal is already satisfied
-- It marks goals as done prematurely → Decision never gets called → no final answer
+**The hybrid approach ensures retrieval always works** — vector search for quality, keyword fallback for resilience.
 
-**Current mitigations (partial, not a full fix):**
+### 5. How does document indexing work?
 
-- `memory.read()` uses keyword overlap **scoring** (not exact match) — items with more keyword overlap rank higher, so relevant items tend to beat irrelevant ones
-- **Synthesis fallback** in `agent6.py`: if Perception marks all goals done but no answer exists in history, forces a Decision call with attached artifacts and empty tools list — guarantees an answer is always produced
-- MemoryItems have a `run_id` field, but `memory.read()` does not filter by it (Session 6 simplification)
+The `index_document` MCP tool enables a **RAG (Retrieval-Augmented Generation)** workflow:
 
-**Proper fixes (not implemented in S6, would be in a production system):**
+1. **Index phase**: User says "make this file searchable" → Decision calls `index_document` → file is chunked (400-word sliding window, 80-word overlap) → each chunk becomes a `fact` MemoryItem with an embedding → stored in memory.json + FAISS index
+2. **Query phase**: User asks a question about the indexed content → Decision calls `search_knowledge` → vector search over `fact` chunks → returns top-k ranked chunks with provenance → Decision synthesizes the answer
 
-- Run-scoped filtering: prioritize current-run memory items, deprioritize old ones
-- Embedding-based retrieval instead of keyword matching (semantic similarity)
-- Confidence decay for older items
-- Manual clearing between unrelated queries: `rm state/memory.json`
+This avoids re-fetching or re-reading source files and enables semantic search over large documents across runs.

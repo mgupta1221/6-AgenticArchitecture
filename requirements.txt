@@ -10,7 +10,11 @@ tavily-python>=0.5
 crawl4ai>=0.8
 html2text>=2024.2
 
-# ── LLM Gateway V3 ──
+# ── Vector search ──
+faiss-cpu>=1.7
+numpy>=1.24
+
+# ── LLM Gateway V7 ──
 fastapi>=0.110
 uvicorn[standard]>=0.27
 jsonschema>=4.21

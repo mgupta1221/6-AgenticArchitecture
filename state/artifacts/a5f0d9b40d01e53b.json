@@ -1,7 +1,0 @@
-{
-  "id": "art:a5f0d9b40d01e53b",
-  "content_type": "text/plain",
-  "size_bytes": 176301,
-  "source": "tool:fetch_url",
-  "descriptor": "{\n  \"status\": 200,\n  \"content_type\": \"text/markdown\",\n  \"length_bytes\": 170954,\n  \"text\": \"[](./File:Question_book-new.svg)| This article **needs additional citations for[verification](./Wikipedia:Verifiability \\\"Wikipedia:Verifiability\\\")**. Please help [improve this article](./Special:EditPage/Claude_Shannon \\\"Special:EditPage/Claude Shannon\\\") by [adding citations to reliable sources](./Help:Referencing_for_beginners \\\"Help:Referencing for beginners\\\"). Unsourced material may be challenged an"
-}

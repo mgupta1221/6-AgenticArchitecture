@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>LLM Gateway V3 · Dashboard</title>
+<title>LLM Gateway V7 · Dashboard</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
@@ -55,7 +55,7 @@
 </head>
 <body>
 <header>
-  <h1>⚡ LLM Gateway <span style="color:var(--accent)">V3</span> <span class="badge" id="port-badge"></span></h1>
+  <h1>⚡ LLM Gateway <span style="color:var(--accent)">V7</span> <span class="badge" id="port-badge"></span></h1>
   <nav>
     <a href="/">Dashboard</a>
     <a href="/help">Help / Free Keys</a>
@@ -76,7 +76,11 @@
   <div id="router-order" class="order-list" style="font-size:11px; margin-bottom:8px;">loading…</div>
   <div id="routers" class="grid"></div>
 
-  <h2>Quick test (V3 features supported)</h2>
+  <h2>Embedders <span style="float:right; font-size:11px; text-transform:none; letter-spacing:0; color:var(--accent)">V7 only — fixed 768-dim, Ollama → Gemini failover</span></h2>
+  <div id="embed-order" class="order-list" style="font-size:11px; margin-bottom:8px;">loading…</div>
+  <div id="embedders" class="grid"></div>
+
+  <h2>Quick test (V7 features supported)</h2>
   <div class="test-area">
     <select id="test-prov"><option value="">auto (failover)</option></select>
     <select id="test-route">
@@ -226,6 +230,41 @@ async function refreshRouters() {
   });
 }
 
+async function refreshEmbedders() {
+  let r;
+  try { r = await fetch('/v1/embedders').then(x => x.json()); }
+  catch (e) { return; }
+  document.getElementById('embed-order').innerHTML =
+    `<b>${r.order.join(' → ')}</b> · fixed dim <b>${r.fixed_dim}</b> · max input <b>${r.max_input_chars}</b> chars · backoff ${r.backoff_steps_s.join(' → ')}s`;
+  const grid = document.getElementById('embedders');
+  grid.innerHTML = '';
+  Object.keys(r.live).forEach(name => {
+    const s = r.live[name];
+    const today = (r.today && r.today[name]) || {};
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.borderLeft = '3px solid var(--accent)';
+    const rpmLabel = s.rpm_limit > 0 ? `${s.rpm_used} / ${s.rpm_limit}` : `${s.rpm_used} / ∞`;
+    const rpmPct = s.rpm_limit > 0 ? Math.min(100, s.rpm_used / s.rpm_limit * 100) : 0;
+    const cdPill = s.cooldown_remaining > 0
+      ? ` <span class="pill err">cooldown ${s.cooldown_remaining.toFixed(1)}s</span>` : '';
+    const boPill = s.backoff_remaining > 0
+      ? ` <span class="pill err" title="${s.backoff_reason}">backoff ${s.backoff_remaining.toFixed(0)}s (step ${s.backoff_step})</span>` : '';
+    card.innerHTML = `
+      <div class="name">${name}${cdPill}${boPill}</div>
+      <div class="model">${r.models[name]}</div>
+      <div style="margin-top:10px;">
+        <div class="row"><span>RPM</span><b>${rpmLabel}</b></div>
+        <div class="bar"><div class="${barClass(s.rpm_used, s.rpm_limit || 99999)}" style="width:${rpmPct}%"></div></div>
+      </div>
+      <div class="row" style="margin-top:8px;"><span>Cooldown</span><b>${s.cooldown_s}s</b></div>
+      <div class="row"><span>Today</span><b>${today.calls || 0} calls · ${today.errors || 0} errors</b></div>
+      <div class="row"><span>Avg latency</span><b>${today.avg_latency ? today.avg_latency.toFixed(0) + 'ms' : '—'}</b></div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
 async function loadCalls() {
   const prov = document.getElementById('filter-prov').value;
   const stat = document.getElementById('filter-status').value;
@@ -293,8 +332,8 @@ async function runTest() {
 }
 
 document.getElementById('port-badge').textContent = 'port ' + location.port;
-loadCaps().then(() => { refresh(); refreshRouters(); loadCalls(); });
-setInterval(() => { refresh(); refreshRouters(); loadCalls(); }, 5000);
+loadCaps().then(() => { refresh(); refreshRouters(); refreshEmbedders(); loadCalls(); });
+setInterval(() => { refresh(); refreshRouters(); refreshEmbedders(); loadCalls(); }, 5000);
 </script>
 </body>
 </html>

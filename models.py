@@ -16,6 +16,7 @@ class MemoryItem(BaseModel):
     descriptor: str
     value: dict
     artifact_id: str | None = None
+    embedding: list[float] | None = None
     source: str
     run_id: str
     goal_id: str | None = None

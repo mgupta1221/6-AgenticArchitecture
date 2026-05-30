@@ -20,7 +20,7 @@ from mcp.client.stdio import stdio_client
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from llm_gatewayV3.client import LLM
+from llm_gatewayV7.client import LLM
 from models import Goal, Observe
 from artifact_store import ArtifactStore
 from memory import Memory
@@ -29,7 +29,7 @@ from decision import Decision
 from action import Action
 
 MAX_ITERATIONS = 15
-GATEWAY_URL = "http://localhost:8101"
+GATEWAY_URL = "http://localhost:8107"
 
 
 def _goal_prefix(g: Goal) -> str:
@@ -42,7 +42,7 @@ def ensure_gateway():
         r.raise_for_status()
     except Exception as e:
         print(f"[error] Gateway not reachable at {GATEWAY_URL}: {e}")
-        print("Start it first: cd llm_gatewayV3 && python main.py")
+        print("Start it first: cd llm_gatewayV7 && python main.py")
         sys.exit(1)
 
 
@@ -55,7 +55,10 @@ async def mcp_session():
     async with stdio_client(server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            yield session
+            try:
+                yield session
+            except asyncio.CancelledError:
+                pass
 
 
 async def load_tools(session: ClientSession):

@@ -6,7 +6,7 @@ An agentic application with a strict orchestration loop (Agent6 loop) and five r
 
 ## Existing infrastructure (DO NOT recreate)
 
-- **LLM Gateway V3**: `llm_gatewayV3/` — already built. Run with `cd llm_gatewayV3 && python main.py` (serves on http://localhost:8101). Use the client at `llm_gatewayV3/client.py` (`from llm_gatewayV3.client import LLM`).
+- **LLM Gateway V7**: `llm_gatewayV7/` — already built. Run with `cd llm_gatewayV7 && python main.py` (serves on http://localhost:8107). Use the client at `llm_gatewayV7/client.py` (`from llm_gatewayV7.client import LLM`). V7 is V3 plus a `POST /v1/embed` endpoint (Ollama default, Gemini fallback, 768-dim).
 - **MCP Server**: `mcp_server.py` — already built. 9 tools: web_search, fetch_url, get_time, currency_convert, read_file, list_dir, create_file, update_file, edit_file. Stdio transport. Requires `.env` file and dependencies: `ddgs`, `crawl4ai`, `tavily`.
 
 ## What needs to be built
@@ -26,7 +26,7 @@ Project/
   agent6_prompt.md          # Architectural spec (read-only reference)
   claude.md                 # This file
   mcp_server.py             # MCP server (already built)
-  llm_gatewayV3/            # LLM gateway (already built)
+  llm_gatewayV7/            # LLM gateway (already built, V3 + embed endpoint)
     client.py               # Gateway client — import LLM from here
     main.py                 # Gateway server entry point
     ...
@@ -47,9 +47,9 @@ Project/
 ## How to use the gateway client
 
 ```python
-from llm_gatewayV3.client import LLM
+from llm_gatewayV7.client import LLM
 
-llm = LLM()  # defaults to http://localhost:8101
+llm = LLM()  # defaults to http://localhost:8107
 
 # Perception — pinned to Gemini
 result = llm.chat(
@@ -101,7 +101,7 @@ async with stdio_client(server_params) as (read, write):
 
 ## Running the project
 
-1. Start the gateway: `cd llm_gatewayV3 && python main.py`
+1. Start the gateway: `cd llm_gatewayV7 && python main.py`
 2. Ensure `.env` has required API keys
 3. Run the agent: `python agent6.py`
 

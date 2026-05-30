@@ -1,9 +1,10 @@
 """
 MCP server for EAGV3 Session 6.
 
-Nine tools, stdio transport:
+Eleven tools, stdio transport:
     web_search, fetch_url, get_time, currency_convert,
-    read_file, list_dir, create_file, update_file, edit_file
+    read_file, list_dir, create_file, update_file, edit_file,
+    index_document, search_knowledge
 
 web_search:  Tavily primary, DuckDuckGo fallback. Hard-capped at 5 results.
 fetch_url:   crawl4ai primary, httpx+html2text fallback.
@@ -28,6 +29,14 @@ import httpx
 from ddgs import DDGS
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+from artifact_store import ArtifactStore as _ArtifactStore
+from llm_gatewayV7.client import LLM as _LLM
+from memory import Memory as _Memory
+
+_artifact_store = _ArtifactStore()
+_llm = _LLM()
+_memory = _Memory(_llm)
 
 MAX_SEARCH_RESULTS = 5  # hard cap — Tavily prices per result
 
@@ -359,6 +368,85 @@ def edit_file(path: str, find: str, replace: str, replace_all: bool = False) -> 
         "replacements": replacements,
         "size_bytes": p.stat().st_size,
     }
+
+
+# ── document indexing (Session 7) ───────────────────────────────────────────
+
+def _read_for_index(path: str) -> tuple[str, str]:
+    """Return (content, source_label) for an indexable file or artifact."""
+    if path.startswith("art:"):
+        return _artifact_store.get_bytes(path).decode("utf-8", errors="replace"), path
+    p = _safe(path)
+    return p.read_text(encoding="utf-8"), f"sandbox:{path}"
+
+
+def _chunk_text(text: str, size: int = 400, overlap: int = 80) -> list[str]:
+    """Sliding-window chunking by word count. S7 default; semantic chunking
+    arrives in Session 8."""
+    words = text.split()
+    if not words:
+        return []
+    chunks: list[str] = []
+    stride = max(1, size - overlap)
+    i = 0
+    while i < len(words):
+        chunks.append(" ".join(words[i:i + size]))
+        if i + size >= len(words):
+            break
+        i += stride
+    return chunks
+
+
+@mcp.tool()
+def index_document(path: str, chunk_size: int = 400, overlap: int = 80) -> dict:
+    """Chunk a sandbox file or artifact and write each chunk into Memory as a searchable `fact`. Use this when the content must remain retrievable across later turns or runs (an indexing step before later vector queries). For one-shot inspection of a known file's contents in this turn, prefer `read_file` instead. Example: index_document("notes/spec.md")."""
+    text, source = _read_for_index(path)
+    if not text.strip():
+        return {"path": path, "source": source, "chunks_indexed": 0, "warning": "empty content"}
+    chunks = _chunk_text(text, size=chunk_size, overlap=overlap)
+    run_id = f"index-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    indexed = 0
+    for i, chunk in enumerate(chunks):
+        preview = chunk[:120].replace("\n", " ")
+        descriptor = f"[{source} chunk {i+1}/{len(chunks)}] {preview}"
+        chunk_words = {w.lower() for w in chunk.split() if len(w) > 2}
+        keywords = sorted(chunk_words)[:20]
+        _memory.add_fact(
+            descriptor=descriptor,
+            value={
+                "chunk": chunk,
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+                "source": source,
+            },
+            keywords=keywords,
+            source=source,
+            run_id=run_id,
+        )
+        indexed += 1
+    return {
+        "path": path,
+        "source": source,
+        "chunks_indexed": indexed,
+        "chunk_size": chunk_size,
+        "overlap": overlap,
+    }
+
+
+@mcp.tool()
+def search_knowledge(query: str, k: int = 5) -> list[dict]:
+    """Vector search over indexed `fact` chunks. Returns up to k ranked chunks with provenance. Call this rather than re-fetching URLs or re-reading source files whenever Memory already contains indexed chunks for the topic — that is the whole point of having indexed the corpus. Example: search_knowledge("authentication flow", 5)."""
+    items = _memory.read(query, history=[], kinds=["fact"], top_k=k)
+    return [
+        {
+            "id": item.id,
+            "descriptor": item.descriptor,
+            "source": item.source,
+            "chunk_preview": (item.value.get("chunk") or "")[:240],
+            "metadata": {k_: v for k_, v in item.value.items() if k_ != "chunk"},
+        }
+        for item in items
+    ]
 
 
 if __name__ == "__main__":

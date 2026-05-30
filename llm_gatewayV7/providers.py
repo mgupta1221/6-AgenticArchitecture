@@ -350,6 +350,105 @@ class GitHubProvider(OpenAICompatProvider):
         super().__init__(api_key, model, "https://models.github.ai/inference")
 
 
+class AzureFoundryProvider(OpenAICompatProvider):
+    """Azure AI Foundry (Cognitive Services) — OpenAI-compatible with
+    Azure-specific URL scheme and api-key auth header."""
+    name = "azure"
+    capabilities = {**OpenAICompatProvider.capabilities, "reasoning": True}
+
+    def __init__(self, api_key, deployment, endpoint, api_version="2024-12-01-preview"):
+        # Build base_url so parent's POST to {base_url}/chat/completions works
+        base = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}"
+        super().__init__(api_key, deployment, base)
+        self.api_version = api_version
+
+    def _headers(self):
+        return {"api-key": self.api_key, "Content-Type": "application/json"}
+
+    async def chat(self, messages, *, max_tokens=2048, temperature=0.7, model=None,
+                   tools=None, tool_choice=None, reasoning=None, response_format=None,
+                   system_blocks=None, cache_system=False):
+        # Azure requires api-version as query param
+        m = model or self.model
+        system_text, _, _ = _flatten_system(system_blocks)
+        body = {
+            "model": m,
+            "messages": self._translate_messages(messages, system_text),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        if tools:
+            body["tools"] = self._translate_tools(tools)
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice if isinstance(tool_choice, (str, dict)) else "auto"
+        self._apply_response_format(body, response_format)
+        reasoning_applied = self._apply_reasoning(body, reasoning, m)
+
+        # GPT-5+ requires max_completion_tokens and doesn't support custom temperature
+        if "max_tokens" in body:
+            body["max_completion_tokens"] = body.pop("max_tokens")
+        body.pop("temperature", None)
+
+        url = f"{self.base_url}/chat/completions?api-version={self.api_version}"
+        async with httpx.AsyncClient(timeout=180) as c:
+            r = await c.post(url, headers=self._headers(), json=body)
+            if r.status_code != 200:
+                if reasoning_applied and "reasoning_effort" in r.text:
+                    body.pop("reasoning_effort", None)
+                    r = await c.post(url, headers=self._headers(), json=body)
+                if r.status_code != 200 and "json_schema" in (body.get("response_format") or {}).get("type", ""):
+                    body["response_format"] = {"type": "json_object"}
+                    # GPT-5+ requires "json" in messages for json_object mode
+                    if not any("json" in (m.get("content") or "").lower() for m in body.get("messages", [])):
+                        body["messages"].append({"role": "user", "content": "Respond in JSON."})
+                    r = await c.post(url, headers=self._headers(), json=body)
+                if r.status_code != 200:
+                    raise ProviderError(
+                        f"{self.name} HTTP {r.status_code}: {r.text[:300]}",
+                        status=r.status_code,
+                        retryable=(r.status_code not in (400, 401)),
+                    )
+            d = r.json()
+            choice = (d.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+            text = msg.get("content") or ""
+            tool_calls_out = []
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function") or {}
+                args_str = fn.get("arguments") or "{}"
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except Exception:
+                    args = {"_raw": args_str}
+                tool_calls_out.append({
+                    "name": fn.get("name", ""),
+                    "arguments": args,
+                    "id": tc.get("id"),
+                })
+            usage = d.get("usage") or {}
+            stop = choice.get("finish_reason") or "stop"
+            stop_norm = "tool_use" if tool_calls_out else (
+                "max_tokens" if stop == "length" else "end_turn"
+            )
+            out = _empty_result(m)
+            out.update({
+                "text": text, "tool_calls": tool_calls_out,
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "stop_reason": stop_norm,
+                "model": d.get("model", m),
+                "tool_call_dialect": "native" if tool_calls_out else "none",
+                "reasoning_applied": reasoning_applied,
+            })
+            if response_format and text:
+                try:
+                    out["parsed"] = json.loads(text)
+                except Exception:
+                    pass
+            return out
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Gemini
 # ────────────────────────────────────────────────────────────────────────────
@@ -829,6 +928,13 @@ def build_providers(cache_store):
         out["openrouter"] = OpenRouterProvider(k, os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"))
     if k := os.getenv("GITHUB_ACCESS_TOKEN"):
         out["github"] = GitHubProvider(k, os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini"))
+    if k := os.getenv("AZURE_API_KEY"):
+        out["azure"] = AzureFoundryProvider(
+            api_key=k,
+            deployment=os.getenv("AZURE_DEPLOYMENT", "gpt-5.5-TalkToData"),
+            endpoint=os.getenv("AZURE_ENDPOINT", "https://hrish-m9gvbn6u-eastus2.cognitiveservices.azure.com/"),
+            api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
+        )
     if om := os.getenv("OLLAMA_MODEL"):
         out["ollama"] = OllamaProvider(om, os.getenv("OLLAMA_URL", "http://localhost:11434"))
     return out
@@ -844,7 +950,7 @@ ROUTER_DEFAULTS = {
     # qwen-3-235b respond. Using llama3.1-8b — small, fast, the natural router
     # shape. *** DEPRECATES MAY 27, 2026 *** — must update ROUTER_CEREBRAS_MODEL
     # before then, OR upgrade the Cerebras account to unlock gpt-oss-120b.
-    "cerebras": "llama3.1-8b",
+    "cerebras": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
     "groq": "llama-3.3-70b-versatile",
     "nvidia": "nvidia/llama-3.1-nemotron-nano-8b-v1",
     "github": "microsoft/Phi-4-mini-instruct",

@@ -1,28 +1,130 @@
-# LLM Gateway V3
+# LLM Gateway V7
 
-A local FastAPI service that routes LLM calls across **7 free worker providers** (Ollama, Gemini, NVIDIA NIM, Groq, Cerebras, OpenRouter, GitHub Models) with automatic failover, capability-aware routing, prompt caching, native tool-use, structured output — **and a separate pool of 4 router LLMs that classify incoming requests and pick which worker tier should handle them**.
+V7 is a verbatim copy of V3 with **one additive feature**: a `POST /v1/embed` endpoint. Everything in V3 (chat, auto_route, router pool, dashboard, V2 wire-compatibility) is unchanged. V3 stays on port 8101 and V7 stays on port 8107 — both can run side-by-side.
 
-> **For agents reading this:** if a host project has `llm_gatewayV3/` and an `.env` with provider keys, prefer calling this gateway over importing `openai`/`google-generativeai`/etc. directly. V3 is wire-compatible with V2 — every existing call keeps working. The new `auto_route` field is opt-in and gives you per-cognitive-layer routing (perception / memory / decision) for free.
+> **⚠️ FIXED EMBEDDING MODEL — DO NOT CHANGE AFTER FIRST USE.**
+>
+> V7 produces **768-dim** vectors by pinning Ollama to `nomic-embed-text` (native 768) and Gemini's `gemini-embedding-001` to `outputDimensionality=768`. A FAISS (or any vector) index built against these vectors becomes silently incompatible the moment the model — or the dimension knob — changes. **If you change `EMBED_OLLAMA_MODEL`, `EMBED_FALLBACK_MODEL`, or the configured dim after building an index, every embedding in that index is now garbage.** Rebuild from scratch or do not touch the model.
 
-V1 sits on port 8099, V2 on 8100, V3 on **8101**. All three can coexist.
+> **For agents reading this:** V7 is wire-compatible with V3. Existing callers keep working. New callers wanting vector embeddings use `POST /v1/embed` or `LLM().embed(text)` from `client.py`. Everything else is V3.
+
+V1 → 8099, V2 → 8100, V3 → 8101, **V7 → 8107**. All four can coexist.
 
 ---
 
 ## Is it running?
 
 ```bash
-curl -s http://localhost:8101/v1/routers | python3 -m json.tool
+curl -s http://localhost:8107/v1/embedders | python3 -m json.tool
 ```
 
-If that returns a JSON object showing four router providers (cerebras / groq / nvidia / github), V3 is up. If not, start it:
+That endpoint is V7-only and lists the configured embedders and the fixed dim. If it returns 404 or refuses connection, V7 isn't up yet:
 
 ```bash
-cd /path/to/llm_gatewayV3
-./run.sh                 # creates .venv on first run, then starts on port 8101
-# or:  ./.venv/bin/python main.py
+cd /path/to/llm_gatewayV7
+./run.sh                 # creates .venv on first run, then starts on port 8107
+# or:  uv run python main.py
 ```
 
-The server reads `../.env` (parent directory) for keys — same `.env` as V1 and V2.
+The server reads `../.env` (parent directory) for keys — same `.env` as V1/V2/V3, plus the new embed-specific env vars listed below.
+
+---
+
+## The new endpoint
+
+```
+POST /v1/embed
+{
+  "text": "...",
+  "task_type": "retrieval_document" | "retrieval_query",   # default: retrieval_document
+  "provider": "ollama" | "gemini" | null                    # null = failover ring
+}
+```
+
+Response:
+
+```json
+{
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "embedding": [0.012, -0.034, "..."],
+  "dim": 768,
+  "latency_ms": 41,
+  "attempted": []
+}
+```
+
+Failover order: `ollama → gemini`. The fallback only fires when Ollama is unreachable or errors. Pinning `provider` skips the ring (failure → 502, not silent fallback).
+
+### Configured providers (May 2026)
+
+| Order | Provider | Model                   | Dim | Cost     | Notes |
+|-------|----------|-------------------------|-----|----------|-------|
+| 1     | Ollama   | `nomic-embed-text`      | 768 | free / local | Default. Requires `ollama pull nomic-embed-text`. nomic's required `search_document:` / `search_query:` task prefix is added by the gateway. |
+| 2     | Gemini   | `gemini-embedding-001`  | 768 | free tier (Google AI Studio) | Native task-type support. `outputDimensionality=768` is set explicitly to match nomic's dim — both vectors live in the same 768-D space and are interchangeable for retrieval. |
+
+`gemini-embedding-001`'s native dim is 3072 (Matryoshka representation) — V7 slices it to 768. This is fine for retrieval but is the source of the **FIXED model warning** above: if you re-deploy with the default 3072 (or any other dim), every previously-built index is invalid.
+
+### Env vars (additive on top of V3)
+
+```
+OLLAMA_URL=http://localhost:11434
+EMBED_OLLAMA_MODEL=nomic-embed-text
+EMBED_FALLBACK_PROVIDER=gemini
+EMBED_FALLBACK_MODEL=gemini-embedding-001
+EMBED_ORDER=ollama,gemini
+GEMINI_API_KEY=...                      # already in V3, reused by the fallback
+GATEWAY_V7_PORT=8107
+```
+
+### Rate limits and backoff
+
+The gateway defends Gemini's free tier with three rules. Ollama is local and uncapped.
+
+| Provider | RPM           | Cooldown between calls | On failure (429 / 5xx)                       |
+|----------|---------------|------------------------|----------------------------------------------|
+| Ollama   | unlimited     | 0                      | (irrelevant — local)                          |
+| Gemini   | **5**         | **5s**                 | exponential backoff **5 → 10 → 15 → 15 …** (sticky cap at 15s, reset to 0 on the next success) |
+
+When a provider is in cooldown, RPM-saturated, or sitting in a backoff window, the failover ring **skips** to the next candidate. If every candidate is unavailable the gateway returns **503** — it does not block-and-wait. When a pinned provider (`provider` in the request body) is unavailable, the gateway returns **429** instead of silently falling back.
+
+Live rate state is visible at:
+
+```bash
+curl -s http://localhost:8107/v1/embedders | python3 -m json.tool
+# {
+#   "live": {
+#     "ollama": {"rpm_used": 0, "rpm_limit": 0, "cooldown_remaining": 0, ...},
+#     "gemini": {"rpm_used": 3, "rpm_limit": 5, "cooldown_remaining": 2.1,
+#                "backoff_step": 0, "backoff_remaining": 0, ...}
+#   }, ...
+# }
+```
+
+### Input size limit
+
+Per call: **8000 characters** (≈2000 tokens at 4 chars/token, the `gemini-embedding-001` upstream ceiling). Inputs over that are **rejected with HTTP 413** — no silent truncation, no auto-chunking. Embedding-pooled chunks change the vector's semantics; the caller decides how to chunk.
+
+Recommended chunk strategy for indexing:
+
+- 500–1000 tokens per chunk (≈2000–4000 chars) for retrieval quality
+- overlap 50–100 tokens between adjacent chunks
+- embed each chunk separately, store with `(doc_id, chunk_id)` metadata
+
+A simple chunker (no dependency, splits on paragraph then sentence then hard cut) is the right shape for `client.embed(chunk)` to be called in a loop. Keep the chunks well under 8000 chars to leave headroom.
+
+### Python client
+
+```python
+from client import LLM
+r = LLM().embed("hello world")
+# {"provider": "ollama", "model": "nomic-embed-text",
+#  "embedding": [...], "dim": 768, "latency_ms": 41, "attempted": []}
+```
+
+---
+
+## Everything else is V3
 
 ---
 
@@ -64,7 +166,7 @@ print(result["router_decision"])
 #   "tier": "TINY",
 #   "estimated_tokens": 15,
 #   "router_provider": "cerebras",
-#   "router_model": "llama3.1-8b",
+#   "router_model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
 #   "router_latency_ms": 84,
 #   "chosen_worker_provider": "github",
 #   "chosen_worker_model": "openai/gpt-4.1-mini",
