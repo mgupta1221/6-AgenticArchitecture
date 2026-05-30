@@ -1,4 +1,4 @@
-# Agent6 — Architecture Deep Dive
+# Agent 7 — Architecture Deep Dive - With memory and Retrieval
 
 > This file is a read-only reference document. It is **not** loaded into any LLM prompt or tool call at runtime
 
@@ -766,7 +766,7 @@ When a user passes a query like *"Find 3 family-friendly things to do in Tokyo t
 - `history = []` — list of dicts, tracks every event in this run, dies when the run ends.
 - `prior_goals = []` — list of `Goal` objects, set once by Perception on iteration 1, then only `done` flags and `attach_artifact_id` are updated.
 
-**Phase 1 — `memory.remember(query)`** [LLM Call — Gemini]
+**Phase 1 — `memory.remember(query)*`* [LLM Call — Gemini]
 
 The raw query is sent to Memory. An LLM call (Gemini, `provider="g"`) classifies it and extracts keywords + a descriptor. A `MemoryItem` is created (kind: `"scratchpad"`, source: `"user_query"`). Since scratchpad items skip embedding, no vector is generated. The item is **appended to `state/memory.json`** on disk.
 
@@ -778,18 +778,20 @@ Connects to `mcp_server.py` via stdio transport. Loads the 11 available tools: `
 
 Each iteration runs these steps in order:
 
-| Step | Component | LLM? | What Happens |
-|------|-----------|------|--------------|
-| A | `memory.read(query, history)` | Embed only | **Hybrid retrieval**: first embeds the query via gateway `/v1/embed` (768-dim, `task_type="retrieval_query"`), then runs FAISS cosine-similarity search across all stored embeddings. If vector search returns results, uses those. If embedding fails or FAISS has no entries, falls back to pure Python keyword-overlap search. Returns top-8 hits. |
-| B | `Perception.observe(obs)` | Yes (Gemini) | Receives an `Observe` packet containing query, memory_hits, history, and prior_goals. On **iteration 1**, creates the goal list from scratch. On **iteration 2+**, reviews history and updates only `done` flags and `attach_artifact_id` on existing goals. Goals are **never added, removed, or reordered** (Session 6 constraint). Result is appended to history as `{kind: "perception"}`. |
-| C | Completion check | No | If all goals are `done` AND an answer exists in history → **BREAK**. If all goals are `done` but no answer exists → **synthesis fallback**: creates a temporary `Goal(id="synthesis")`, attaches last 3 artifacts, calls Decision with empty tools list (forces an answer), appends to history, then **BREAK**. |
-| D | Goal selection | No | Picks the first goal in `prior_goals` where `done == False`. |
-| E | Artifact attachment | No | If Perception set `attach_artifact_id` on the selected goal and the artifact exists on disk, loads the raw bytes into `attached = [(artifact_id, bytes)]`. |
-| F | `Decision.next_step(goal, hits, attached, history, tools)` | Yes (auto-routed) | Receives the current goal, memory hits, attached artifact bytes (if any), last 10 history events, and the 11 tool definitions. Returns **exactly one of**: a final answer (plain text) or one tool call (name + arguments). Decision is aware of `index_document` and `search_knowledge` tools — it uses `index_document` for "make searchable" goals and `search_knowledge` for "query the knowledge base" goals. |
-| G | If **answer**: append `{kind: "answer", text: "..."}` to history. Loop continues; next iteration Perception will mark the goal done. | | |
-| H | If **tool call**: `Action.execute()` dispatches the MCP tool. If output > 4096 bytes, it's stored in `ArtifactStore` on disk (`.bin` + `.json`) and only a 2000-char descriptor + artifact handle are returned. If ≤ 4096 bytes, the full text stays inline. | No | |
-| I | `memory.record_outcome()` | Yes (Gemini) + Embed | LLM classifies the tool result, extracts facts/preferences, creates 1+ MemoryItems. Each non-scratchpad item gets a 768-dim embedding via `/v1/embed` and is **appended to both `state/memory.json` AND the FAISS index** on disk. |
-| J | Append `{kind: "action", tool, arguments, result_descriptor, artifact_id}` to history. | No | |
+
+| Step | Component                                                                                                                                                                                                                                                    | LLM?                 | What Happens                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A    | `memory.read(query, history)`                                                                                                                                                                                                                                | Embed only           | **Hybrid retrieval**: first embeds the query via gateway `/v1/embed` (768-dim, `task_type="retrieval_query"`), then runs FAISS cosine-similarity search across all stored embeddings. If vector search returns results, uses those. If embedding fails or FAISS has no entries, falls back to pure Python keyword-overlap search. Returns top-8 hits.                                                              |
+| B    | `Perception.observe(obs)`                                                                                                                                                                                                                                    | Yes (Gemini)         | Receives an `Observe` packet containing query, memory_hits, history, and prior_goals. On **iteration 1**, creates the goal list from scratch. On **iteration 2+**, reviews history and updates only `done` flags and `attach_artifact_id` on existing goals. Goals are **never added, removed, or reordered** (Session 6 constraint). Result is appended to history as `{kind: "perception"}`.                     |
+| C    | Completion check                                                                                                                                                                                                                                             | No                   | If all goals are `done` AND an answer exists in history → **BREAK**. If all goals are `done` but no answer exists → **synthesis fallback**: creates a temporary `Goal(id="synthesis")`, attaches last 3 artifacts, calls Decision with empty tools list (forces an answer), appends to history, then **BREAK**.                                                                                                    |
+| D    | Goal selection                                                                                                                                                                                                                                               | No                   | Picks the first goal in `prior_goals` where `done == False`.                                                                                                                                                                                                                                                                                                                                                       |
+| E    | Artifact attachment                                                                                                                                                                                                                                          | No                   | If Perception set `attach_artifact_id` on the selected goal and the artifact exists on disk, loads the raw bytes into `attached = [(artifact_id, bytes)]`.                                                                                                                                                                                                                                                         |
+| F    | `Decision.next_step(goal, hits, attached, history, tools)`                                                                                                                                                                                                   | Yes (auto-routed)    | Receives the current goal, memory hits, attached artifact bytes (if any), last 10 history events, and the 11 tool definitions. Returns **exactly one of**: a final answer (plain text) or one tool call (name + arguments). Decision is aware of `index_document` and `search_knowledge` tools — it uses `index_document` for "make searchable" goals and `search_knowledge` for "query the knowledge base" goals. |
+| G    | If **answer**: append `{kind: "answer", text: "..."}` to history. Loop continues; next iteration Perception will mark the goal done.                                                                                                                         |                      |                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| H    | If **tool call**: `Action.execute()` dispatches the MCP tool. If output > 4096 bytes, it's stored in `ArtifactStore` on disk (`.bin` + `.json`) and only a 2000-char descriptor + artifact handle are returned. If ≤ 4096 bytes, the full text stays inline. | No                   |                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| I    | `memory.record_outcome()`                                                                                                                                                                                                                                    | Yes (Gemini) + Embed | LLM classifies the tool result, extracts facts/preferences, creates 1+ MemoryItems. Each non-scratchpad item gets a 768-dim embedding via `/v1/embed` and is **appended to both `state/memory.json` AND the FAISS index** on disk.                                                                                                                                                                                 |
+| J    | Append `{kind: "action", tool, arguments, result_descriptor, artifact_id}` to history.                                                                                                                                                                       | No                   |                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
 
 **Phase 4 — Final Answer**
 
@@ -825,13 +827,15 @@ After the loop exits, `final_answer_from(history)` scans history in reverse and 
 
 They answer different questions:
 
-| | History | Memory |
-|---|---|---|
-| **Question it answers** | "What happened so far **in THIS run**?" | "What do I already know **from ALL past runs**?" |
-| **Used by** | Perception (which goals are done?), Decision (avoid repeating tool calls) | memory.read() returns relevant past knowledge to Perception and Decision |
-| **Granularity** | Every event: perception updates, tool calls, answers | Condensed: only extracted facts, tool outcomes, user preferences |
-| **Lifetime** | Current run only | Persists forever (until manually deleted) |
-| **Retrieval** | Sequential scan | FAISS vector search (primary) + keyword overlap (fallback) |
+
+|                         | History                                                                   | Memory                                                                   |
+| ----------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| **Question it answers** | "What happened so far **in THIS run**?"                                   | "What do I already know **from ALL past runs**?"                         |
+| **Used by**             | Perception (which goals are done?), Decision (avoid repeating tool calls) | memory.read() returns relevant past knowledge to Perception and Decision |
+| **Granularity**         | Every event: perception updates, tool calls, answers                      | Condensed: only extracted facts, tool outcomes, user preferences         |
+| **Lifetime**            | Current run only                                                          | Persists forever (until manually deleted)                                |
+| **Retrieval**           | Sequential scan                                                           | FAISS vector search (primary) + keyword overlap (fallback)               |
+
 
 **Example of memory helping across runs:**
 
@@ -842,13 +846,15 @@ They answer different questions:
 
 Exactly **4 places** in the codebase make LLM calls, plus embedding calls:
 
-| Component | When | Provider | Purpose |
-|-----------|------|----------|---------|
-| `memory.remember(query)` | Once at run start | Gemini (`provider="g"`) | Classify query into a MemoryItem |
-| `Perception.observe()` | Every iteration | Gemini (`provider="g"`) | Create goals (iter 1) or update done flags (iter 2+) |
-| `Decision.next_step()` | Every iteration with an unfinished goal | Auto-routed (`auto_route="decision"`) | Pick one tool call or return a final answer |
-| `memory.record_outcome()` | After every tool call | Gemini (`provider="g"`) | Extract facts/outcomes from tool results |
-| `memory._try_embed()` | After each non-scratchpad MemoryItem creation + each `memory.read()` query | Gateway `/v1/embed` (Ollama/Gemini) | Generate 768-dim embedding vectors |
+
+| Component                 | When                                                                       | Provider                              | Purpose                                              |
+| ------------------------- | -------------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------- |
+| `memory.remember(query)`  | Once at run start                                                          | Gemini (`provider="g"`)               | Classify query into a MemoryItem                     |
+| `Perception.observe()`    | Every iteration                                                            | Gemini (`provider="g"`)               | Create goals (iter 1) or update done flags (iter 2+) |
+| `Decision.next_step()`    | Every iteration with an unfinished goal                                    | Auto-routed (`auto_route="decision"`) | Pick one tool call or return a final answer          |
+| `memory.record_outcome()` | After every tool call                                                      | Gemini (`provider="g"`)               | Extract facts/outcomes from tool results             |
+| `memory._try_embed()`     | After each non-scratchpad MemoryItem creation + each `memory.read()` query | Gateway `/v1/embed` (Ollama/Gemini)   | Generate 768-dim embedding vectors                   |
+
 
 **Total for a typical 3-iteration run:** ~9 LLM calls + ~6 embedding calls
 (1 remember + 3 perception + 3 decision + 2 record_outcome + 3 query embeds + 3 item embeds)
@@ -858,11 +864,13 @@ Everything else — `memory.read()` FAISS search, `Action.execute()`, `ArtifactS
 ### 4. How does vector search improve over keyword-only retrieval?
 
 **Keyword overlap (base version):**
+
 - "Plan a Tokyo trip" matches memory items containing the word "Tokyo"
 - Also matches "Tokyo population census" (same keyword, wrong intent)
 - Misses "Explore Japanese capital" (different words, same meaning)
 
 **FAISS vector search (current version):**
+
 - "Plan a Tokyo trip" is embedded to a 768-dim vector
 - Cosine similarity finds semantically related items regardless of exact words
 - "Explore Japanese capital" scores high (similar meaning)

@@ -1,4 +1,4 @@
-# Agentic Architecture (S6)
+# Agentic Architecture - With Memory and Retrieval (S7)
 
 An agentic application built around a strict orchestration loop with five runtime components: **Memory**, **Perception**, **Decision**, **Action**, and **ArtifactStore**. The agent accepts a natural-language query, decomposes it into bounded goals, executes MCP tool calls to gather information, and synthesizes a final answer — all routed through an intelligent LLM gateway that distributes calls across multiple providers.
 
